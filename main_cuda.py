@@ -99,6 +99,8 @@ for i in pbar:
     vec_to_pt_history = []
     act_diff_history = []
     v_preds = []
+    a_pred_history = []
+    act_world_history = []  # a_pred - v_pred : the exact quantity the deployment wrapper computes
     vid = []
     v_net_feats = []
     h = None
@@ -159,6 +161,10 @@ for i in pbar:
 
         a_pred, v_pred, *_ = (R @ act.reshape(B, 3, -1)).unbind(-1)
         v_preds.append(v_pred)
+        # act_world is what the PX4 deployment wrapper reconstructs (thr_est_error=1 at inference).
+        # Capture it here so native-sim vs deployment can be compared directly.
+        a_pred_history.append(a_pred)
+        act_world_history.append(a_pred - v_pred)
         act = (a_pred - v_pred - env.g_std) * env.thr_est_error[:, None] + env.g_std
         act_buffer.append(act)
         v_net_feats.append(torch.cat([act, local_v, h], -1))
@@ -225,10 +231,18 @@ for i in pbar:
     sched.step()
 
 
+    act_world_history = torch.stack(act_world_history)   # (T, B, 3)
+    a_pred_history = torch.stack(a_pred_history)          # (T, B, 3)
+
     with torch.no_grad():
         avg_speed = speed_history.mean(0)
         success = torch.all(distance.flatten(0, 1) > 0, 0)
         _success = success.sum() / B
+        # Deployment-parity diagnostics: act_world = a_pred - v_pred [m/s^2], world frame.
+        # At hover this should be ~[0, 0, +9.8]. The z-mean confirms gravity compensation;
+        # the horizontal magnitude shows how much lateral thrust the policy commands.
+        act_world_z = act_world_history[..., 2]
+        act_world_xy = act_world_history[..., :2].norm(dim=-1)
         smooth_dict({
             'loss': loss,
             'loss_v': loss_v,
@@ -244,7 +258,12 @@ for i in pbar:
             'success': _success,
             'max_speed': speed_history.max(0).values.mean(),
             'avg_speed': avg_speed.mean(),
-            'ar': (success * avg_speed).mean()})
+            'ar': (success * avg_speed).mean(),
+            'act_world_z_mean': act_world_z.mean(),
+            'act_world_z_min': act_world_z.min(),
+            'act_world_z_max': act_world_z.max(),
+            'act_world_xy_mean': act_world_xy.mean(),
+            'act_world_xy_max': act_world_xy.max()})
         log_dict = {}
         if is_save_iter(i):
             # vid = torch.stack(vid).cpu().div(10).clamp(0, 1)[None, :, None]
@@ -266,12 +285,23 @@ for i in pbar:
             ax.plot(act_buffer[:, 1], label='y')
             ax.plot(act_buffer[:, 2], label='z')
             ax.legend()
+            # act_world = a_pred - v_pred : the deployment wrapper's thrust-accel command.
+            # z should sit near +9.8 (gravity-compensated hover); large |xy| means lateral thrust.
+            fig_aw, ax = plt.subplots()
+            aw = act_world_history[:, 4].cpu()
+            ax.plot(aw[:, 0], label='x')
+            ax.plot(aw[:, 1], label='y')
+            ax.plot(aw[:, 2], label='z')
+            ax.axhline(9.80665, color='k', ls='--', lw=0.8, label='g (hover z)')
+            ax.set_title('act_world = a_pred - v_pred [m/s^2]')
+            ax.legend()
             wandb.log({
                 'p_history': wandb.Image(fig_p),
                 'v_history': wandb.Image(fig_v),
                 'a_reals': wandb.Image(fig_a),
+                'act_world': wandb.Image(fig_aw),
             }, step=i + 1)
-            plt.close(fig_p); plt.close(fig_v); plt.close(fig_a)
+            plt.close(fig_p); plt.close(fig_v); plt.close(fig_a); plt.close(fig_aw)
         if (i + 1) % 10000 == 0:
             torch.save(model.state_dict(), f'checkpoint{i//10000:04d}.pth')
         if (i + 1) % 25 == 0:
