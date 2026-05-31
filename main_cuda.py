@@ -7,8 +7,8 @@ import torch
 from torch.nn import functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+import wandb
 
 import argparse
 from model import Model
@@ -16,6 +16,8 @@ from model import Model
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--resume', default=None)
+parser.add_argument('--wandb_project', default='diffphys-omega')
+parser.add_argument('--wandb_run_name', default=None)
 parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--num_iters', type=int, default=50000)
 parser.add_argument('--coef_v', type=float, default=1.0, help='smooth l1 of norm(v_set - v_real)')
@@ -42,8 +44,8 @@ parser.add_argument('--random_rotation', default=False, action='store_true')
 parser.add_argument('--yaw_drift', default=False, action='store_true')
 parser.add_argument('--no_odom', default=False, action='store_true')
 args = parser.parse_args()
-writer = SummaryWriter()
 print(args)
+wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
 
 device = torch.device('cuda')
 
@@ -264,13 +266,14 @@ for i in pbar:
             ax.plot(act_buffer[:, 1], label='y')
             ax.plot(act_buffer[:, 2], label='z')
             ax.legend()
-            # writer.add_video('demo', vid, i + 1, 15)
-            writer.add_figure('p_history', fig_p, i + 1)
-            writer.add_figure('v_history', fig_v, i + 1)
-            writer.add_figure('a_reals', fig_a, i + 1)
+            wandb.log({
+                'p_history': wandb.Image(fig_p),
+                'v_history': wandb.Image(fig_v),
+                'a_reals': wandb.Image(fig_a),
+            }, step=i + 1)
+            plt.close(fig_p); plt.close(fig_v); plt.close(fig_a)
         if (i + 1) % 10000 == 0:
             torch.save(model.state_dict(), f'checkpoint{i//10000:04d}.pth')
         if (i + 1) % 25 == 0:
-            for k, v in scaler_q.items():
-                writer.add_scalar(k, sum(v) / len(v), i + 1)
+            wandb.log({k: sum(v) / len(v) for k, v in scaler_q.items()}, step=i + 1)
             scaler_q.clear()
