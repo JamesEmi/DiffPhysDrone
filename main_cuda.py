@@ -161,10 +161,12 @@ for i in pbar:
 
         a_pred, v_pred, *_ = (R @ act.reshape(B, 3, -1)).unbind(-1)
         v_preds.append(v_pred)
-        # act_world is what the PX4 deployment wrapper reconstructs (thr_est_error=1 at inference).
-        # Capture it here so native-sim vs deployment can be compared directly.
+        # NET acceleration command = a_pred - v_pred. This is gravity-SUBTRACTED: at hover
+        # it is ~[0,0,0], NOT [0,0,9.8]. The rotors must produce thrust = net + [0,0,g]
+        # (the CUDA kernel adds +9.80665 to act[2] everywhere it computes thrust).
+        # The PX4 deployment wrapper must therefore add [0,0,g] before converting to a force.
         a_pred_history.append(a_pred)
-        act_world_history.append(a_pred - v_pred)
+        act_world_history.append(a_pred - v_pred)  # net accel (gravity already removed)
         act = (a_pred - v_pred - env.g_std) * env.thr_est_error[:, None] + env.g_std
         act_buffer.append(act)
         v_net_feats.append(torch.cat([act, local_v, h], -1))
